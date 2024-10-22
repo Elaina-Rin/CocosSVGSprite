@@ -160,14 +160,14 @@ typedef struct NSVGimage
 } NSVGimage;
 
 // Parses SVG file from a file, returns SVG image as paths.
-NSVGimage* nsvgParseFromFile(const char* filename, const char* units, float dpi);
+static NSVGimage* nsvgParseFromFile(const char* filename, const char* units, float dpi);
 
 // Parses SVG file from a null terminated string, returns SVG image as paths.
 // Important note: changes the string.
-NSVGimage* nsvgParse(char* input, const char* units, float dpi);
+static NSVGimage* nsvgParse(char* input, const char* units, float dpi);
 
 // Deletes list of paths.
-void nsvgDelete(NSVGimage* image);
+static void nsvgDelete(NSVGimage* image);
 
 #ifdef __cplusplus
 };
@@ -423,6 +423,13 @@ typedef struct NSVGattrib
 	char visible;
 } NSVGattrib;
 
+struct StyleText
+{
+    bool enable;
+    std::string styleText;
+};
+static std::map<std::string,StyleText> StyleSheetMap;
+
 typedef struct NSVGparser
 {
 	NSVGattrib attr[NSVG_MAX_ATTR];
@@ -438,6 +445,8 @@ typedef struct NSVGparser
 	float dpi;
 	char pathFlag;
 	char defsFlag;
+    char styleFlag;
+    std::string styleContent;
 } NSVGparser;
 
 static void nsvg__xformIdentity(float* t)
@@ -1635,8 +1644,10 @@ static int nsvg__parseAttr(NSVGparser* p, const char* name, const char* value)
 	float xform[6];
 	NSVGattrib* attr = nsvg__getAttr(p);
 	if (!attr) return 0;
-
-	if (strcmp(name, "style") == 0) {
+    
+    printf("enter nsvg__parseAttr\r\n %s:%s\r\n",name,value);
+    
+    if (strcmp(name, "style") == 0) {
 		nsvg__parseStyle(p, value);
 	} else if (strcmp(name, "display") == 0) {
 		if (strcmp(value, "none") == 0)
@@ -1695,7 +1706,9 @@ static int nsvg__parseAttr(NSVGparser* p, const char* name, const char* value)
 	} else if (strcmp(name, "id") == 0) {
 		strncpy(attr->id, value, 63);
 		attr->id[63] = '\0';
-	} else {
+	} else if (strcmp(name, "class") == 0) {
+        nsvg__parseStyle(p,StyleSheetMap[value].styleText.c_str());
+    } else {
 		return 0;
 	}
 	return 1;
@@ -1759,8 +1772,12 @@ static void nsvg__parseAttribs(NSVGparser* p, const char** attr)
 	int i;
 	for (i = 0; attr[i]; i += 2)
 	{
+        //此段if else 重复了，nsvg__parseAttr中有对style的处理
 		if (strcmp(attr[i], "style") == 0)
-			nsvg__parseStyle(p, attr[i + 1]);
+        {
+            printf("%s:%s\r\n",attr[i],attr[i+1]);
+            nsvg__parseStyle(p, attr[i + 1]);
+        }
 		else
 			nsvg__parseAttr(p, attr[i], attr[i + 1]);
 	}
@@ -2564,10 +2581,54 @@ static void nsvg__parseGradientStop(NSVGparser* p, const char** attr)
 	stop->offset = curAttr->stopOffset;
 }
 
+static void nsvg__parseStyleContent(NSVGparser* p, std::string styleContent)
+{
+    bool intext=0;
+    std::string classname;
+    std::string value;
+    StyleText temp;
+    for(auto i = 0; i < styleContent.size(); i++)
+    {
+        if(styleContent[i]=='{'){
+            intext=1;
+            continue;
+        }
+        else if(styleContent[i]=='}'){
+            intext=0;
+            for(auto& j : StyleSheetMap)
+                j.second.enable = 0;
+            continue;
+        }
+        
+        if(intext==1)
+        {
+            for(auto& k : StyleSheetMap)
+            {
+                if( k.second.enable == 1 )
+                    k.second.styleText += styleContent[i];
+            }
+            continue;
+        }
+        
+        if( intext==0 && styleContent[i]=='.' ){
+            classname.clear();
+            i++;
+            while(i < styleContent.length()&&styleContent[i]!=' ' && styleContent[i]!=',')
+            {
+                classname+=styleContent[i];
+                i++;
+            }
+            if(StyleSheetMap.find(classname) == StyleSheetMap.end())
+                StyleSheetMap.insert(std::make_pair(classname,temp));
+            StyleSheetMap[classname].enable=1;
+        }
+    }
+}
+
 static void nsvg__startElement(void* ud, const char* el, const char** attr)
 {
 	NSVGparser* p = (NSVGparser*)ud;
-
+//    printf("defsFlag=%d    styleFlag=%d    el:%s    attr:%s\r\n",p->defsFlag,p->styleFlag,el,attr);
 	if (p->defsFlag) {
 		// Skip everything but gradients in defs
 		if (strcmp(el, "linearGradient") == 0) {
@@ -2576,7 +2637,11 @@ static void nsvg__startElement(void* ud, const char* el, const char** attr)
 			nsvg__parseGradient(p, attr, NSVG_PAINT_RADIAL_GRADIENT);
 		} else if (strcmp(el, "stop") == 0) {
 			nsvg__parseGradientStop(p, attr);
-		}
+		} else if(strcmp(el, "style")==0) {
+            p->styleFlag = 1;
+//            printf("defsFlag=%d    styleFlag=%d    el:%s    attr:%s\r\n",p->defsFlag,p->styleFlag,el,attr);
+            p->styleContent.clear();
+        }
 		return;
 	}
 
@@ -2636,14 +2701,24 @@ static void nsvg__endElement(void* ud, const char* el)
 		p->pathFlag = 0;
 	} else if (strcmp(el, "defs") == 0) {
 		p->defsFlag = 0;
-	}
+    } else if (strcmp(el, "style") == 0){
+        p->styleFlag = 0;
+        nsvg__parseStyleContent(p, p->styleContent);
+    }
 }
 
 static void nsvg__content(void* ud, const char* s)
 {
-	NSVG_NOTUSED(ud);
-	NSVG_NOTUSED(s);
+//	NSVG_NOTUSED(ud);
+//	NSVG_NOTUSED(s);
 	// empty
+    
+    //新增内容处理：如果tag是style，就把style标签下的内容存进styleContent
+    NSVGparser* p = (NSVGparser*)ud;
+
+    if (p->styleFlag) {
+        p->styleContent.append(s);  // 累积 <style> 标签中的内容
+    }
 }
 
 static void nsvg__imageBounds(NSVGparser* p, float* bounds)
